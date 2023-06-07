@@ -14,6 +14,7 @@ namespace Tests
     [TestClass]
     public class SomeTests
     {
+        // Set up Mountebank to run in a container.
         private static readonly IContainer Container = new ContainerBuilder()
             .WithImage("bbyars/mountebank")
             .WithName("mountebank")
@@ -31,18 +32,21 @@ namespace Tests
         [ClassInitialize]
         public static async Task StartMountebank(TestContext context)
         {
+            // Start Mountebank container.
             await Container.StartAsync();
         }
 
         [ClassCleanup]
         public static async Task StopMountebank()
         {
+            // Stop Mountebank container.
             await Container.StopAsync();
         }
 
         [TestCleanup]
         public async Task ResetMountebank()
         {
+            // Wipe everything that has been configured in Mountebank after each test.
             await MountebankClient.DeleteAllImpostersAsync();
         }
 
@@ -51,6 +55,7 @@ namespace Tests
         [TestMethod]
         public async Task SimpleNotFound()
         {
+            // Simple stub that always returns 404.
             await MountebankClient.CreateHttpImposterAsync(8000, imposter =>
             {
                 imposter.AddStub().ReturnsStatus(HttpStatusCode.NotFound);
@@ -66,6 +71,7 @@ namespace Tests
         [TestMethod]
         public async Task GetJsonResponse()
         {
+            // Stub that returns a JSON serialized JobStatus for the specified GET request.
             await MountebankClient.CreateHttpImposterAsync(8000, "Job Service", imposter =>
             {
                 imposter.AddStub()
@@ -91,6 +97,7 @@ namespace Tests
         [TestMethod]
         public async Task SimplePredicateMatching()
         {
+            // Returns specified body only when the request body matches.
             await MountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
             {
                 imposter.AddStub()
@@ -113,6 +120,7 @@ namespace Tests
         {
             await MountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
             {
+                // Stub that returns a rotating response each time it is called.
                 imposter.AddStub()
                     .OnPathAndMethodEqual("/echo", Method.Post)
                     .On(new EqualsPredicate<HttpPredicateFields>(new HttpPredicateFields
@@ -141,6 +149,7 @@ namespace Tests
         {
             await MountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
             {
+                // Stubs to return unique responses for different requests, with a default response.
                 imposter.AddStub()
                     .OnPathAndMethodEqual("/echo", Method.Post)
                     .On(new EqualsPredicate<HttpPredicateFields>(new HttpPredicateFields
