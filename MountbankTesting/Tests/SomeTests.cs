@@ -3,44 +3,55 @@ using DotNet.Testcontainers.Builders;
 using DotNet.Testcontainers.Containers;
 using FluentAssertions;
 using MbDotNet;
+using MbDotNet.Models;
+using MbDotNet.Models.Predicates;
+using MbDotNet.Models.Predicates.Fields;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Newtonsoft.Json;
 
 namespace Tests
 {
     [TestClass]
     public class SomeTests
     {
-        private readonly IContainer _container = new ContainerBuilder()
+        private static readonly IContainer Container = new ContainerBuilder()
             .WithImage("bbyars/mountebank")
             .WithName("mountebank")
             .WithPortBinding(2525, 2525)
-            .WithExposedPort(3000)
-            .WithExposedPort(3100)
+            .WithExposedPort(8000)
             .WithPortBinding(8000, 8000)
             .WithWaitStrategy(Wait.ForUnixContainer().UntilPortIsAvailable(2525))
             .WithHostname("localhost")
             .Build();
 
-        private readonly MountebankClient _mountebankClient = new();
+        private static readonly MountebankClient MountebankClient = new();
         private readonly HttpClient _httpClient = new HttpClient();
 
 
-        [TestInitialize]
-        public async Task Initialize()
+        [ClassInitialize]
+        public static async Task StartMountebank(TestContext context)
         {
-            await _container.StartAsync();
+            await Container.StartAsync();
+        }
+
+        [ClassCleanup]
+        public static async Task StopMountebank()
+        {
+            await Container.StopAsync();
         }
 
         [TestCleanup]
-        public async Task Cleanup()
+        public async Task ResetMountebank()
         {
-            await _container.StopAsync();
+            await MountebankClient.DeleteAllImpostersAsync();
         }
 
+
+
         [TestMethod]
-        public async Task Test()
+        public async Task SimpleNotFound()
         {
-            await _mountebankClient.CreateHttpImposterAsync(8000, imposter =>
+            await MountebankClient.CreateHttpImposterAsync(8000, imposter =>
             {
                 imposter.AddStub().ReturnsStatus(HttpStatusCode.NotFound);
             });
@@ -50,6 +61,117 @@ namespace Tests
             var response = await _httpClient.SendAsync(request);
 
             response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        }
+
+        [TestMethod]
+        public async Task GetJsonResponse()
+        {
+            await MountebankClient.CreateHttpImposterAsync(8000, "Job Service", imposter =>
+            {
+                imposter.AddStub()
+                    .OnPathAndMethodEqual("/job/job1", Method.Get)
+                    .ReturnsJson(HttpStatusCode.OK, new JobStatus { Id = "job1", Errors = 2, Warnings = 1, Deferred = false });
+            });
+
+            var request = new HttpRequestMessage(HttpMethod.Get, "http://localhost:8000/job/job1");
+            var response = await _httpClient.SendAsync(request);
+
+            response.StatusCode.Should().Be(HttpStatusCode.OK);
+            
+            var body = await response.Content.ReadAsStringAsync();
+
+            var jobStatus = JsonConvert.DeserializeObject<JobStatus>(body);
+            jobStatus.Should().NotBeNull();
+            jobStatus!.Id.Should().Be("job1");
+            jobStatus.Errors.Should().Be(2);
+            jobStatus.Warnings.Should().Be(1);
+            jobStatus.Deferred.Should().BeFalse();
+        }
+
+        [TestMethod]
+        public async Task SimplePredicateMatching()
+        {
+            await MountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
+            {
+                imposter.AddStub()
+                    .OnPathAndMethodEqual("/echo", Method.Post)
+                    .On(new EqualsPredicate<HttpPredicateFields>(new HttpPredicateFields
+                    {
+                        RequestBody = "Bob"
+                    }))
+                    .ReturnsBody(HttpStatusCode.OK, "Hello, Bob!");
+            });
+
+            var response = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("bob"));
+
+            response.StatusCode.Should().Be(HttpStatusCode.OK);
+            (await response.Content.ReadAsStringAsync()).Should().Be("Hello, Bob!");
+        }
+
+        [TestMethod]
+        public async Task MultipleResponses()
+        {
+            await MountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
+            {
+                imposter.AddStub()
+                    .OnPathAndMethodEqual("/echo", Method.Post)
+                    .On(new EqualsPredicate<HttpPredicateFields>(new HttpPredicateFields
+                    {
+                        RequestBody = "Bob"
+                    }))
+                    .ReturnsBody(HttpStatusCode.OK, "Hello, Bob!")
+                    .ReturnsBody(HttpStatusCode.OK, "Greetings, Bob!");
+            });
+
+            var response = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("Bob"));
+            response.StatusCode.Should().Be(HttpStatusCode.OK);
+            (await response.Content.ReadAsStringAsync()).Should().Be("Hello, Bob!");
+
+            var response2 = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("Bob"));
+            response2.StatusCode.Should().Be(HttpStatusCode.OK);
+            (await response2.Content.ReadAsStringAsync()).Should().Be("Greetings, Bob!");
+
+            var response3 = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("Bob"));
+            response3.StatusCode.Should().Be(HttpStatusCode.OK);
+            (await response3.Content.ReadAsStringAsync()).Should().Be("Hello, Bob!");
+        }
+
+        [TestMethod]
+        public async Task MultipleStubsWithDefault()
+        {
+            await MountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
+            {
+                imposter.AddStub()
+                    .OnPathAndMethodEqual("/echo", Method.Post)
+                    .On(new EqualsPredicate<HttpPredicateFields>(new HttpPredicateFields
+                    {
+                        RequestBody = "Alice"
+                    }))
+                    .ReturnsBody(HttpStatusCode.OK, "Hello, Alice!");
+
+                imposter.AddStub()
+                    .OnPathAndMethodEqual("/echo", Method.Post)
+                    .On(new EqualsPredicate<HttpPredicateFields>(new HttpPredicateFields
+                    {
+                        RequestBody = "Bob"
+                    }))
+                    .ReturnsBody(HttpStatusCode.OK, "Hello, Bob!");
+
+                imposter.AddStub()
+                    .ReturnsBody(HttpStatusCode.OK, "I don't know you!");
+            });
+
+            var response = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("Alice"));
+            response.StatusCode.Should().Be(HttpStatusCode.OK);
+            (await response.Content.ReadAsStringAsync()).Should().Be("Hello, Alice!");
+
+            var response2 = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("Bob"));
+            response2.StatusCode.Should().Be(HttpStatusCode.OK);
+            (await response2.Content.ReadAsStringAsync()).Should().Be("Hello, Bob!");
+
+            var response3 = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("Charlie"));
+            response3.StatusCode.Should().Be(HttpStatusCode.OK);
+            (await response3.Content.ReadAsStringAsync()).Should().Be("I don't know you!");
         }
     }
 }
