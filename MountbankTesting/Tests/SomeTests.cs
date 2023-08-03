@@ -17,16 +17,14 @@ namespace Tests
         // Set up Mountebank to run in a container.
         private static readonly IContainer Container = new ContainerBuilder()
             .WithImage("bbyars/mountebank")
-            .WithName("mountebank")
-            .WithPortBinding(2525, 2525)
-            .WithExposedPort(8000)
-            .WithPortBinding(8000, 8000)
+            .WithPortBinding(2525, true)
+            .WithPortBinding(8000, true)
             .WithWaitStrategy(Wait.ForUnixContainer().UntilPortIsAvailable(2525))
             .WithHostname("localhost")
             .Build();
 
-        private static readonly MountebankClient MountebankClient = new();
-        private readonly HttpClient _httpClient = new HttpClient();
+        private static MountebankClient MountebankClient;
+        private readonly HttpClient _httpClient = new();
 
 
         [ClassInitialize]
@@ -34,6 +32,8 @@ namespace Tests
         {
             // Start Mountebank container.
             await Container.StartAsync();
+
+            MountebankClient = new(new Uri($"http://localhost:{Container.GetMappedPublicPort(2525)}"));
         }
 
         [ClassCleanup]
@@ -55,13 +55,15 @@ namespace Tests
         [TestMethod]
         public async Task SimpleNotFound()
         {
+            var imposterPort = Container.GetMappedPublicPort(8000);
+
             // Simple stub that always returns 404.
             await MountebankClient.CreateHttpImposterAsync(8000, imposter =>
             {
                 imposter.AddStub().ReturnsStatus(HttpStatusCode.NotFound);
             });
 
-            var request = new HttpRequestMessage(HttpMethod.Get, "http://localhost:8000/customers?id=123");
+            var request = new HttpRequestMessage(HttpMethod.Get, $"http://localhost:{imposterPort}/customers?id=123");
 
             var response = await _httpClient.SendAsync(request);
 
@@ -71,6 +73,8 @@ namespace Tests
         [TestMethod]
         public async Task GetJsonResponse()
         {
+            var imposterPort = Container.GetMappedPublicPort(8000);
+
             // Stub that returns a JSON serialized JobStatus for the specified GET request.
             await MountebankClient.CreateHttpImposterAsync(8000, "Job Service", imposter =>
             {
@@ -79,7 +83,7 @@ namespace Tests
                     .ReturnsJson(HttpStatusCode.OK, new JobStatus { Id = "job1", Errors = 2, Warnings = 1, Deferred = false });
             });
 
-            var request = new HttpRequestMessage(HttpMethod.Get, "http://localhost:8000/job/job1");
+            var request = new HttpRequestMessage(HttpMethod.Get, $"http://localhost:{imposterPort}/job/job1");
             var response = await _httpClient.SendAsync(request);
 
             response.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -97,6 +101,8 @@ namespace Tests
         [TestMethod]
         public async Task SimplePredicateMatching()
         {
+            var imposterPort = Container.GetMappedPublicPort(8000);
+
             // Returns specified body only when the request body matches.
             await MountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
             {
@@ -109,7 +115,7 @@ namespace Tests
                     .ReturnsBody(HttpStatusCode.OK, "Hello, Bob!");
             });
 
-            var response = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("bob"));
+            var response = await _httpClient.PostAsync($"http://localhost:{imposterPort}/echo", new StringContent("bob"));
 
             response.StatusCode.Should().Be(HttpStatusCode.OK);
             (await response.Content.ReadAsStringAsync()).Should().Be("Hello, Bob!");
@@ -118,6 +124,8 @@ namespace Tests
         [TestMethod]
         public async Task MultipleResponses()
         {
+            var imposterPort = Container.GetMappedPublicPort(8000);
+
             await MountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
             {
                 // Stub that returns a rotating response each time it is called.
@@ -131,15 +139,15 @@ namespace Tests
                     .ReturnsBody(HttpStatusCode.OK, "Greetings, Bob!");
             });
 
-            var response = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("Bob"));
+            var response = await _httpClient.PostAsync($"http://localhost:{imposterPort}/echo", new StringContent("Bob"));
             response.StatusCode.Should().Be(HttpStatusCode.OK);
             (await response.Content.ReadAsStringAsync()).Should().Be("Hello, Bob!");
 
-            var response2 = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("Bob"));
+            var response2 = await _httpClient.PostAsync($"http://localhost:{imposterPort}/echo", new StringContent("Bob"));
             response2.StatusCode.Should().Be(HttpStatusCode.OK);
             (await response2.Content.ReadAsStringAsync()).Should().Be("Greetings, Bob!");
 
-            var response3 = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("Bob"));
+            var response3 = await _httpClient.PostAsync($"http://localhost:{imposterPort}/echo", new StringContent("Bob"));
             response3.StatusCode.Should().Be(HttpStatusCode.OK);
             (await response3.Content.ReadAsStringAsync()).Should().Be("Hello, Bob!");
         }
@@ -147,6 +155,8 @@ namespace Tests
         [TestMethod]
         public async Task MultipleStubsWithDefault()
         {
+            var imposterPort = Container.GetMappedPublicPort(8000);
+
             await MountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
             {
                 // Stubs to return unique responses for different requests, with a default response.
@@ -170,15 +180,15 @@ namespace Tests
                     .ReturnsBody(HttpStatusCode.OK, "I don't know you!");
             });
 
-            var response = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("Alice"));
+            var response = await _httpClient.PostAsync($"http://localhost:{imposterPort}/echo", new StringContent("Alice"));
             response.StatusCode.Should().Be(HttpStatusCode.OK);
             (await response.Content.ReadAsStringAsync()).Should().Be("Hello, Alice!");
 
-            var response2 = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("Bob"));
+            var response2 = await _httpClient.PostAsync($"http://localhost:{imposterPort}/echo", new StringContent("Bob"));
             response2.StatusCode.Should().Be(HttpStatusCode.OK);
             (await response2.Content.ReadAsStringAsync()).Should().Be("Hello, Bob!");
 
-            var response3 = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("Charlie"));
+            var response3 = await _httpClient.PostAsync($"http://localhost:{imposterPort}/echo", new StringContent("Charlie"));
             response3.StatusCode.Should().Be(HttpStatusCode.OK);
             (await response3.Content.ReadAsStringAsync()).Should().Be("I don't know you!");
         }
