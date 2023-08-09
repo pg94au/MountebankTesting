@@ -1,4 +1,5 @@
 ﻿using System.Net;
+using System.Net.Http.Headers;
 using DotNet.Testcontainers.Builders;
 using DotNet.Testcontainers.Containers;
 using FluentAssertions;
@@ -191,6 +192,34 @@ namespace Tests
             var response3 = await _httpClient.PostAsync($"http://localhost:{imposterPort}/echo", new StringContent("Charlie"));
             response3.StatusCode.Should().Be(HttpStatusCode.OK);
             (await response3.Content.ReadAsStringAsync()).Should().Be("I don't know you!");
+        }
+
+        [TestMethod]
+        public async Task RequireBearerTokenInAuthorizationHeader()
+        {
+            var imposterPort = Container.GetMappedPublicPort(8000);
+
+            // Returns specified body only when the request body matches.
+            await MountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
+            {
+                imposter.AddStub()
+                    .OnPathAndMethodEqual("/echo", Method.Post)
+                    .On(new EqualsPredicate<HttpPredicateFields>(new HttpPredicateFields
+                    {
+                        Headers = new Dictionary<string, object>
+                        {
+                            { "Authorization", "Bearer good" }
+                        },
+                        RequestBody = "Bob"
+                    }))
+                    .ReturnsBody(HttpStatusCode.OK, "Hello, Bob!");
+            });
+
+            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "good");
+            var response = await _httpClient.PostAsync($"http://localhost:{imposterPort}/echo", new StringContent("bob"));
+
+            response.StatusCode.Should().Be(HttpStatusCode.OK);
+            (await response.Content.ReadAsStringAsync()).Should().Be("Hello, Bob!");
         }
     }
 }
