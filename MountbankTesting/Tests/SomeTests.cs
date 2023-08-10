@@ -22,9 +22,10 @@ namespace Tests
             .WithPortBinding(8000, true)
             .WithWaitStrategy(Wait.ForUnixContainer().UntilPortIsAvailable(2525))
             .WithHostname("localhost")
+            .WithEntrypoint("mb", "--debug")
             .Build();
 
-        private static MountebankClient MountebankClient;
+        private static MountebankClient? _mountebankClient;
         private readonly HttpClient _httpClient = new();
 
 
@@ -34,7 +35,7 @@ namespace Tests
             // Start Mountebank container.
             await Container.StartAsync();
 
-            MountebankClient = new(new Uri($"http://localhost:{Container.GetMappedPublicPort(2525)}"));
+            _mountebankClient = new(new Uri($"http://{Container.Hostname}:{Container.GetMappedPublicPort(2525)}"));
         }
 
         [ClassCleanup]
@@ -48,7 +49,7 @@ namespace Tests
         public async Task ResetMountebank()
         {
             // Wipe everything that has been configured in Mountebank after each test.
-            await MountebankClient.DeleteAllImpostersAsync();
+            await _mountebankClient.DeleteAllImpostersAsync();
         }
 
 
@@ -59,7 +60,7 @@ namespace Tests
             var imposterPort = Container.GetMappedPublicPort(8000);
 
             // Simple stub that always returns 404.
-            await MountebankClient.CreateHttpImposterAsync(8000, imposter =>
+            await _mountebankClient.CreateHttpImposterAsync(8000, imposter =>
             {
                 imposter.AddStub().ReturnsStatus(HttpStatusCode.NotFound);
             });
@@ -77,7 +78,7 @@ namespace Tests
             var imposterPort = Container.GetMappedPublicPort(8000);
 
             // Stub that returns a JSON serialized JobStatus for the specified GET request.
-            await MountebankClient.CreateHttpImposterAsync(8000, "Job Service", imposter =>
+            await _mountebankClient.CreateHttpImposterAsync(8000, "Job Service", imposter =>
             {
                 imposter.AddStub()
                     .OnPathAndMethodEqual("/job/job1", Method.Get)
@@ -105,7 +106,7 @@ namespace Tests
             var imposterPort = Container.GetMappedPublicPort(8000);
 
             // Returns specified body only when the request body matches.
-            await MountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
+            await _mountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
             {
                 imposter.AddStub()
                     .OnPathAndMethodEqual("/echo", Method.Post)
@@ -127,7 +128,7 @@ namespace Tests
         {
             var imposterPort = Container.GetMappedPublicPort(8000);
 
-            await MountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
+            await _mountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
             {
                 // Stub that returns a rotating response each time it is called.
                 imposter.AddStub()
@@ -158,7 +159,7 @@ namespace Tests
         {
             var imposterPort = Container.GetMappedPublicPort(8000);
 
-            await MountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
+            await _mountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
             {
                 // Stubs to return unique responses for different requests, with a default response.
                 imposter.AddStub()
@@ -200,8 +201,9 @@ namespace Tests
             var imposterPort = Container.GetMappedPublicPort(8000);
 
             // Returns specified body only when the request body matches.
-            await MountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
+            var imposter = await _mountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
             {
+                //imposter.RecordRequests = true;
                 imposter.AddStub()
                     .OnPathAndMethodEqual("/echo", Method.Post)
                     .On(new EqualsPredicate<HttpPredicateFields>(new HttpPredicateFields
@@ -213,6 +215,17 @@ namespace Tests
                         RequestBody = "Bob"
                     }))
                     .ReturnsBody(HttpStatusCode.OK, "Hello, Bob!");
+                imposter.AddStub()
+                    .OnPathAndMethodEqual("/echo", Method.Post)
+                    .On(new EqualsPredicate<HttpPredicateFields>(new HttpPredicateFields
+                    {
+                        Headers = new Dictionary<string, object>
+                        {
+                            { "Authorization", "Bearer bad" }
+                        },
+                        RequestBody = "Bob"
+                    }))
+                    .ReturnsBody(HttpStatusCode.Unauthorized, "Go away!");
             });
 
             _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "good");
@@ -220,6 +233,11 @@ namespace Tests
 
             response.StatusCode.Should().Be(HttpStatusCode.OK);
             (await response.Content.ReadAsStringAsync()).Should().Be("Hello, Bob!");
+
+            var configuredImposter = await _mountebankClient.GetHttpImposterAsync(8000);
+            configuredImposter.NumberOfRequests.Should().Be(1);
+            configuredImposter.Stubs[0].Matches.Count.Should().Be(1);
+            configuredImposter.Stubs[1].Matches.Count.Should().Be(0);
         }
     }
 }
