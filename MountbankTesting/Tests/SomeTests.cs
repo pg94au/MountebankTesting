@@ -25,7 +25,7 @@ namespace Tests
             .WithEntrypoint("mb", "--debug")
             .Build();
 
-        private static MountebankClient? _mountebankClient;
+        private static MountebankClient _mountebankClient;
         private readonly HttpClient _httpClient = new();
 
 
@@ -238,6 +238,41 @@ namespace Tests
             configuredImposter.NumberOfRequests.Should().Be(1);
             configuredImposter.Stubs[0].Matches.Count.Should().Be(1);
             configuredImposter.Stubs[1].Matches.Count.Should().Be(0);
+        }
+
+        [TestMethod]
+        public async Task FormBodyPredicateMatching()
+        {
+            var imposterPort = Container.GetMappedPublicPort(8000);
+
+            // Returns specified body only when the request body matches.
+            await _mountebankClient.CreateHttpImposterAsync(8000, "Foo Service", imposter =>
+            {
+                imposter.AddStub()
+                    .OnPathAndMethodEqual("/api/foo", Method.Post)
+                    .On(new EqualsPredicate<HttpPredicateFields>(new HttpPredicateFields
+                    {
+                        FormContent = new Dictionary<string, string>
+                        {
+                            { "x", "one" },
+                            { "y", "two" },
+                            { "z", "three" }
+                        }
+                    }))
+                    .ReturnsBody(HttpStatusCode.OK, "Hello");
+            });
+
+            var response = await _httpClient.PostAsync($"http://localhost:{imposterPort}/api/foo", new FormUrlEncodedContent(
+                new KeyValuePair<string, string>[]
+                {
+                    new("x", "one"),
+                    new("y", "two"),
+                    new("z", "three")
+                }
+            ));
+
+            response.StatusCode.Should().Be(HttpStatusCode.OK);
+            (await response.Content.ReadAsStringAsync()).Should().Be("Hello");
         }
     }
 }
