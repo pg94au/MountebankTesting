@@ -124,6 +124,29 @@ namespace Tests
         }
 
         [TestMethod]
+        public async Task LoosePredicateMatching()
+        {
+            var imposterPort = Container.GetMappedPublicPort(8000);
+
+            // Returns specified body only when the request body matches.
+            await _mountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
+            {
+                imposter.AddStub()
+                    .OnPathAndMethodEqual("/echo", Method.Post)
+                    .On(new ContainsPredicate<HttpPredicateFields>(new HttpPredicateFields
+                    {
+                        RequestBody = "Bob"
+                    }))
+                    .ReturnsBody(HttpStatusCode.OK, "Hello, Bob!");
+            });
+
+            var response = await _httpClient.PostAsync($"http://localhost:{imposterPort}/echo", new StringContent("Hi, this is Bob!"));
+
+            response.StatusCode.Should().Be(HttpStatusCode.OK);
+            (await response.Content.ReadAsStringAsync()).Should().Be("Hello, Bob!");
+        }
+
+        [TestMethod]
         public async Task MultipleResponses()
         {
             var imposterPort = Container.GetMappedPublicPort(8000);
