@@ -1,4 +1,5 @@
 ﻿using System.Net;
+using System.Text;
 using DotNet.Testcontainers.Builders;
 using DotNet.Testcontainers.Containers;
 using FluentAssertions;
@@ -181,6 +182,31 @@ namespace Tests
             var response3 = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("Charlie"));
             response3.StatusCode.Should().Be(HttpStatusCode.OK);
             (await response3.Content.ReadAsStringAsync()).Should().Be("I don't know you!");
+        }
+
+        [TestMethod]
+        public async Task RecordBinaryPostedBody()
+        {
+            await MountebankClient.CreateHttpImposterAsync(8000, "Binary Post Service", imposter =>
+            {
+                imposter.AddStub()
+                    .OnPathAndMethodEqual("/binary", Method.Post)
+                    .ReturnsStatus(HttpStatusCode.OK);
+                imposter.RecordRequests = true;
+            });
+
+            var response = await _httpClient.PostAsync("http://localhost:8000/binary", new ByteArrayContent(new byte[] { 0x01, 0x02, 0x03, (byte)'a', (byte)'b' }));
+            response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+            var imposter = await MountebankClient.GetHttpImposterAsync(8000);
+
+            var postedBody = imposter.Requests.First().Body;
+
+            postedBody.Should().NotBeNull();
+
+            var originalBytes = Encoding.UTF8.GetBytes(postedBody);
+
+            originalBytes.Should().BeEquivalentTo(new byte[] { 0x01, 0x02, 0x03, (byte)'a', (byte)'b' });
         }
     }
 }
