@@ -1,4 +1,5 @@
 ﻿using System.Net;
+using System.Net.Http.Headers;
 using System.Text;
 using DotNet.Testcontainers.Builders;
 using DotNet.Testcontainers.Containers;
@@ -18,16 +19,15 @@ namespace Tests
         // Set up Mountebank to run in a container.
         private static readonly IContainer Container = new ContainerBuilder()
             .WithImage("bbyars/mountebank")
-            .WithName("mountebank")
-            .WithPortBinding(2525, 2525)
-            .WithExposedPort(8000)
-            .WithPortBinding(8000, 8000)
+            .WithPortBinding(2525, true)
+            .WithPortBinding(8000, true)
             .WithWaitStrategy(Wait.ForUnixContainer().UntilPortIsAvailable(2525))
             .WithHostname("localhost")
+            .WithEntrypoint("mb", "--debug")
             .Build();
 
-        private static readonly MountebankClient MountebankClient = new();
-        private readonly HttpClient _httpClient = new HttpClient();
+        private static MountebankClient _mountebankClient;
+        private readonly HttpClient _httpClient = new();
 
 
         [ClassInitialize]
@@ -35,6 +35,8 @@ namespace Tests
         {
             // Start Mountebank container.
             await Container.StartAsync();
+
+            _mountebankClient = new(new Uri($"http://{Container.Hostname}:{Container.GetMappedPublicPort(2525)}"));
         }
 
         [ClassCleanup]
@@ -48,7 +50,7 @@ namespace Tests
         public async Task ResetMountebank()
         {
             // Wipe everything that has been configured in Mountebank after each test.
-            await MountebankClient.DeleteAllImpostersAsync();
+            await _mountebankClient.DeleteAllImpostersAsync();
         }
 
 
@@ -56,13 +58,15 @@ namespace Tests
         [TestMethod]
         public async Task SimpleNotFound()
         {
+            var imposterPort = Container.GetMappedPublicPort(8000);
+
             // Simple stub that always returns 404.
-            await MountebankClient.CreateHttpImposterAsync(8000, imposter =>
+            await _mountebankClient.CreateHttpImposterAsync(8000, imposter =>
             {
                 imposter.AddStub().ReturnsStatus(HttpStatusCode.NotFound);
             });
 
-            var request = new HttpRequestMessage(HttpMethod.Get, "http://localhost:8000/customers?id=123");
+            var request = new HttpRequestMessage(HttpMethod.Get, $"http://localhost:{imposterPort}/customers?id=123");
 
             var response = await _httpClient.SendAsync(request);
 
@@ -72,15 +76,17 @@ namespace Tests
         [TestMethod]
         public async Task GetJsonResponse()
         {
+            var imposterPort = Container.GetMappedPublicPort(8000);
+
             // Stub that returns a JSON serialized JobStatus for the specified GET request.
-            await MountebankClient.CreateHttpImposterAsync(8000, "Job Service", imposter =>
+            await _mountebankClient.CreateHttpImposterAsync(8000, "Job Service", imposter =>
             {
                 imposter.AddStub()
                     .OnPathAndMethodEqual("/job/job1", Method.Get)
                     .ReturnsJson(HttpStatusCode.OK, new JobStatus { Id = "job1", Errors = 2, Warnings = 1, Deferred = false });
             });
 
-            var request = new HttpRequestMessage(HttpMethod.Get, "http://localhost:8000/job/job1");
+            var request = new HttpRequestMessage(HttpMethod.Get, $"http://localhost:{imposterPort}/job/job1");
             var response = await _httpClient.SendAsync(request);
 
             response.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -98,8 +104,10 @@ namespace Tests
         [TestMethod]
         public async Task SimplePredicateMatching()
         {
+            var imposterPort = Container.GetMappedPublicPort(8000);
+
             // Returns specified body only when the request body matches.
-            await MountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
+            await _mountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
             {
                 imposter.AddStub()
                     .OnPathAndMethodEqual("/echo", Method.Post)
@@ -110,7 +118,30 @@ namespace Tests
                     .ReturnsBody(HttpStatusCode.OK, "Hello, Bob!");
             });
 
-            var response = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("bob"));
+            var response = await _httpClient.PostAsync($"http://localhost:{imposterPort}/echo", new StringContent("bob"));
+
+            response.StatusCode.Should().Be(HttpStatusCode.OK);
+            (await response.Content.ReadAsStringAsync()).Should().Be("Hello, Bob!");
+        }
+
+        [TestMethod]
+        public async Task LoosePredicateMatching()
+        {
+            var imposterPort = Container.GetMappedPublicPort(8000);
+
+            // Returns specified body only when the request body matches.
+            await _mountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
+            {
+                imposter.AddStub()
+                    .OnPathAndMethodEqual("/echo", Method.Post)
+                    .On(new ContainsPredicate<HttpPredicateFields>(new HttpPredicateFields
+                    {
+                        RequestBody = "Bob"
+                    }))
+                    .ReturnsBody(HttpStatusCode.OK, "Hello, Bob!");
+            });
+
+            var response = await _httpClient.PostAsync($"http://localhost:{imposterPort}/echo", new StringContent("Hi, this is Bob!"));
 
             response.StatusCode.Should().Be(HttpStatusCode.OK);
             (await response.Content.ReadAsStringAsync()).Should().Be("Hello, Bob!");
@@ -119,7 +150,9 @@ namespace Tests
         [TestMethod]
         public async Task MultipleResponses()
         {
-            await MountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
+            var imposterPort = Container.GetMappedPublicPort(8000);
+
+            await _mountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
             {
                 // Stub that returns a rotating response each time it is called.
                 imposter.AddStub()
@@ -132,15 +165,15 @@ namespace Tests
                     .ReturnsBody(HttpStatusCode.OK, "Greetings, Bob!");
             });
 
-            var response = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("Bob"));
+            var response = await _httpClient.PostAsync($"http://localhost:{imposterPort}/echo", new StringContent("Bob"));
             response.StatusCode.Should().Be(HttpStatusCode.OK);
             (await response.Content.ReadAsStringAsync()).Should().Be("Hello, Bob!");
 
-            var response2 = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("Bob"));
+            var response2 = await _httpClient.PostAsync($"http://localhost:{imposterPort}/echo", new StringContent("Bob"));
             response2.StatusCode.Should().Be(HttpStatusCode.OK);
             (await response2.Content.ReadAsStringAsync()).Should().Be("Greetings, Bob!");
 
-            var response3 = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("Bob"));
+            var response3 = await _httpClient.PostAsync($"http://localhost:{imposterPort}/echo", new StringContent("Bob"));
             response3.StatusCode.Should().Be(HttpStatusCode.OK);
             (await response3.Content.ReadAsStringAsync()).Should().Be("Hello, Bob!");
         }
@@ -148,7 +181,9 @@ namespace Tests
         [TestMethod]
         public async Task MultipleStubsWithDefault()
         {
-            await MountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
+            var imposterPort = Container.GetMappedPublicPort(8000);
+
+            await _mountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
             {
                 // Stubs to return unique responses for different requests, with a default response.
                 imposter.AddStub()
@@ -171,23 +206,105 @@ namespace Tests
                     .ReturnsBody(HttpStatusCode.OK, "I don't know you!");
             });
 
-            var response = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("Alice"));
+            var response = await _httpClient.PostAsync($"http://localhost:{imposterPort}/echo", new StringContent("Alice"));
             response.StatusCode.Should().Be(HttpStatusCode.OK);
             (await response.Content.ReadAsStringAsync()).Should().Be("Hello, Alice!");
 
-            var response2 = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("Bob"));
+            var response2 = await _httpClient.PostAsync($"http://localhost:{imposterPort}/echo", new StringContent("Bob"));
             response2.StatusCode.Should().Be(HttpStatusCode.OK);
             (await response2.Content.ReadAsStringAsync()).Should().Be("Hello, Bob!");
 
-            var response3 = await _httpClient.PostAsync("http://localhost:8000/echo", new StringContent("Charlie"));
+            var response3 = await _httpClient.PostAsync($"http://localhost:{imposterPort}/echo", new StringContent("Charlie"));
             response3.StatusCode.Should().Be(HttpStatusCode.OK);
             (await response3.Content.ReadAsStringAsync()).Should().Be("I don't know you!");
         }
 
         [TestMethod]
+        public async Task RequireBearerTokenInAuthorizationHeader()
+        {
+            var imposterPort = Container.GetMappedPublicPort(8000);
+
+            // Returns specified body only when the request body matches.
+            var imposter = await _mountebankClient.CreateHttpImposterAsync(8000, "Echo Service", imposter =>
+            {
+                //imposter.RecordRequests = true;
+                imposter.AddStub()
+                    .OnPathAndMethodEqual("/echo", Method.Post)
+                    .On(new EqualsPredicate<HttpPredicateFields>(new HttpPredicateFields
+                    {
+                        Headers = new Dictionary<string, object>
+                        {
+                            { "Authorization", "Bearer good" }
+                        },
+                        RequestBody = "Bob"
+                    }))
+                    .ReturnsBody(HttpStatusCode.OK, "Hello, Bob!");
+                imposter.AddStub()
+                    .OnPathAndMethodEqual("/echo", Method.Post)
+                    .On(new EqualsPredicate<HttpPredicateFields>(new HttpPredicateFields
+                    {
+                        Headers = new Dictionary<string, object>
+                        {
+                            { "Authorization", "Bearer bad" }
+                        },
+                        RequestBody = "Bob"
+                    }))
+                    .ReturnsBody(HttpStatusCode.Unauthorized, "Go away!");
+            });
+
+            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "good");
+            var response = await _httpClient.PostAsync($"http://localhost:{imposterPort}/echo", new StringContent("bob"));
+
+            response.StatusCode.Should().Be(HttpStatusCode.OK);
+            (await response.Content.ReadAsStringAsync()).Should().Be("Hello, Bob!");
+
+            var configuredImposter = await _mountebankClient.GetHttpImposterAsync(8000);
+            configuredImposter.NumberOfRequests.Should().Be(1);
+            configuredImposter.Stubs[0].Matches.Count.Should().Be(1);
+            configuredImposter.Stubs[1].Matches.Count.Should().Be(0);
+        }
+
+        [TestMethod]
+        public async Task FormBodyPredicateMatching()
+        {
+            var imposterPort = Container.GetMappedPublicPort(8000);
+
+            // Returns specified body only when the request body matches.
+            await _mountebankClient.CreateHttpImposterAsync(8000, "Foo Service", imposter =>
+            {
+                imposter.AddStub()
+                    .OnPathAndMethodEqual("/api/foo", Method.Post)
+                    .On(new EqualsPredicate<HttpPredicateFields>(new HttpPredicateFields
+                    {
+                        FormContent = new Dictionary<string, string>
+                        {
+                            { "x", "one" },
+                            { "y", "two" },
+                            { "z", "three" }
+                        }
+                    }))
+                    .ReturnsBody(HttpStatusCode.OK, "Hello");
+            });
+
+            var response = await _httpClient.PostAsync($"http://localhost:{imposterPort}/api/foo", new FormUrlEncodedContent(
+                new KeyValuePair<string, string>[]
+                {
+                    new("x", "one"),
+                    new("y", "two"),
+                    new("z", "three")
+                }
+            ));
+
+            response.StatusCode.Should().Be(HttpStatusCode.OK);
+            (await response.Content.ReadAsStringAsync()).Should().Be("Hello");
+        }
+
+        [TestMethod]
         public async Task RecordBinaryPostedBody()
         {
-            await MountebankClient.CreateHttpImposterAsync(8000, "Binary Post Service", imposter =>
+            var imposterPort = Container.GetMappedPublicPort(8000);
+
+            await _mountebankClient.CreateHttpImposterAsync(8000, "Binary Post Service", imposter =>
             {
                 imposter.AddStub()
                     .OnPathAndMethodEqual("/binary", Method.Post)
@@ -195,10 +312,10 @@ namespace Tests
                 imposter.RecordRequests = true;
             });
 
-            var response = await _httpClient.PostAsync("http://localhost:8000/binary", new ByteArrayContent(new byte[] { 0x01, 0x02, 0x03, (byte)'a', (byte)'b' }));
+            var response = await _httpClient.PostAsync($"http://localhost:{imposterPort}/binary", new ByteArrayContent(new byte[] { 0x01, 0x02, 0x03, (byte)'a', (byte)'b' }));
             response.StatusCode.Should().Be(HttpStatusCode.OK);
 
-            var imposter = await MountebankClient.GetHttpImposterAsync(8000);
+            var imposter = await _mountebankClient.GetHttpImposterAsync(8000);
 
             var postedBody = imposter.Requests.First().Body;
 
